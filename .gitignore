@@ -1,24 +1,24 @@
-# Archivos y directorios comunes a excluir
+# Claves, certificados y secretos (nunca subir)
 *.key
 *.pem
 *.p12
 *.crt
 *.cert
-*.conf
-*.ini
-*.json
-*.yaml
-*.yml
-*.lock
+*secret*
+*credentials*
+*.env
+!.env.example
+
+# Bases de datos locales / temporales
 *.db
 *.sqlite
 *.sqlite3
 *.bak
 *.tmp
 *.temp
+install_log.txt
 
 # Archivos específicos de configuracion
-.env
 .DS_Store
 .vscode/
 
@@ -28,6 +28,7 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Logs
 *.log

@@ -1,0 +1,76 @@
+{
+  "name": "Jarvis - Asistente General (CrewAI)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "jarvis-chat",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1e2c1e10-0000-4000-8000-000000000001",
+      "name": "Webhook (Ingress)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-320, 0],
+      "webhookId": "jarvis-chat"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.JARVIS_ASSISTANT_URL || 'http://jarvis-assistant:8000/assist' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"message\": $json.body.text, \"user_id\": $json.body.user_id, \"language\": $json.body.language || \"es\" } }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "1e2c1e10-0000-4000-8000-000000000002",
+      "name": "Llamar Asistente General",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-80, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"response_text\": $json.response_text, \"success\": $json.success } }}",
+        "options": {}
+      },
+      "id": "1e2c1e10-0000-4000-8000-000000000003",
+      "name": "Responder al usuario",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [160, 0]
+    }
+  ],
+  "connections": {
+    "Webhook (Ingress)": {
+      "main": [
+        [
+          {
+            "node": "Llamar Asistente General",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llamar Asistente General": {
+      "main": [
+        [
+          {
+            "node": "Responder al usuario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

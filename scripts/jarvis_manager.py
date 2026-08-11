@@ -137,6 +137,7 @@ def build_services() -> dict[str, Service]:
     prometheus_port = env("PROMETHEUS_PORT", "9090")
     grafana_port = env("GRAFANA_PORT", "3000")
     streamlit_port = env("STREAMLIT_PORT", "8501")
+    assistant_port = env("ASSISTANT_PORT", "8600")
 
     services: dict[str, Service] = {
         "postgres": Service(
@@ -174,10 +175,18 @@ def build_services() -> dict[str, Service]:
             check=lambda: container_running("prometheus")
             and http_ok(f"http://localhost:{prometheus_port}/-/healthy"),
         ),
+        "jarvis-assistant": Service(
+            "jarvis-assistant",
+            "Asistente general (CrewAI): Planificador + Investigador + Redactor",
+            depends_on=["ollama"],
+            check=lambda: container_running("jarvis-assistant")
+            and http_ok(f"http://localhost:{assistant_port}/health"),
+            startup_hint="La primera respuesta puede tardar mientras Ollama carga el modelo en memoria.",
+        ),
         "n8n": Service(
             "n8n",
             "Workflow engine (ingress, classifier, router, agentes)",
-            depends_on=["postgres", "redis"],
+            depends_on=["postgres", "redis", "jarvis-assistant"],
             check=lambda: container_running("n8n") and http_ok(f"http://localhost:{n8n_port}/healthz"),
             startup_hint="n8n espera a que PostgreSQL esté listo antes de migrar su esquema.",
         ),
@@ -302,6 +311,7 @@ def cmd_doctor(_args: argparse.Namespace) -> None:
         ROOT_DIR / "config" / "neo4j" / "init.cypher",
         ROOT_DIR / "config" / "prometheus" / "prometheus.yml",
         ROOT_DIR / "frontend" / "Dockerfile",
+        ROOT_DIR / "assistant" / "Dockerfile",
     ]:
         if path.exists():
             log(f"[green][OK] {path.relative_to(ROOT_DIR)}[/green]")
@@ -343,11 +353,12 @@ def cmd_up(args: argparse.Namespace) -> None:
         log(f"[red]Servicios desconocidos: {', '.join(unknown)}[/red]")
         sys.exit(1)
 
-    if not args.no_build and "streamlit-ui" in target:
-        log("[bold]Construyendo imágenes locales (streamlit-ui)...[/bold]")
-        compose_run(["build", "streamlit-ui"])
+    local_builds = sorted(target & {"streamlit-ui", "jarvis-assistant"})
+    if not args.no_build and local_builds:
+        log(f"[bold]Construyendo imágenes locales ({', '.join(local_builds)})...[/bold]")
+        compose_run(["build", *local_builds])
 
-    pullable = sorted(target - {"streamlit-ui"})
+    pullable = sorted(target - {"streamlit-ui", "jarvis-assistant"})
     if pullable:
         log(f"[bold]Descargando imágenes (docker compose pull): {', '.join(pullable)}[/bold]")
         compose_run(["pull", "--ignore-pull-failures", *pullable])
@@ -389,6 +400,7 @@ def print_access_urls() -> None:
         ("Grafana", f"http://localhost:{env('GRAFANA_PORT','3000')}"),
         ("Prometheus", f"http://localhost:{env('PROMETHEUS_PORT','9090')}"),
         ("Ollama API", f"http://localhost:{env('OLLAMA_PORT','11434')}"),
+        ("Asistente General (CrewAI)", f"http://localhost:{env('ASSISTANT_PORT','8600')}/docs"),
     ]
     for label, url in rows:
         log(f"  - {label}: {url}")

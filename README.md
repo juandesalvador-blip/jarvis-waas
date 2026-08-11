@@ -5,7 +5,8 @@ informe de arquitectura: orquestación de agentes de IA (cobranza,
 cualificación de leads, citas, soporte) vía **n8n**, con **PostgreSQL**
 (datos estructurados), **Neo4j** (knowledge graph), **MinIO** (S3-compatible),
 **Redis** (cache/colas), **Ollama** (LLMs locales), **Prometheus + Grafana**
-(monitoreo) y un frontend de chat con voz en **Streamlit**.
+(monitoreo), un **Asistente General multi-agente con CrewAI** y un frontend
+de chat con voz en **Streamlit**.
 
 Toda la ejecución de contenedores se automatiza con
 [`scripts/jarvis_manager.py`](scripts/jarvis_manager.py), que:
@@ -24,9 +25,9 @@ Toda la ejecución de contenedores se automatiza con
 
 ```
 jarvis-waas/
-├── docker-compose.yml          # Definición de los 9 servicios de la arquitectura
+├── docker-compose.yml          # Definición de los servicios de la arquitectura
 ├── .env.example                # Variables de entorno (copiar a .env)
-├── requirements.txt            # Dependencias del script de orquestación
+├── requirements.txt            # Dependencias del script de orquestación (+ CrewAI)
 ├── scripts/
 │   └── jarvis_manager.py       # Orquestador Python (CLI)
 ├── config/
@@ -35,7 +36,13 @@ jarvis-waas/
 │   │                           #   deudas, communications
 │   ├── neo4j/init.cypher       # Constraints + nodos de ejemplo del grafo
 │   ├── prometheus/prometheus.yml
-│   └── grafana/provisioning/   # Datasource (Prometheus) + dashboards
+│   ├── grafana/provisioning/   # Datasource (Prometheus) + dashboards
+│   └── n8n/workflows/          # Workflows exportados, listos para importar en n8n
+├── assistant/                   # Microservicio del Asistente General (CrewAI + FastAPI)
+│   ├── crew.py                 # Agentes: Planificador · Investigador · Redactor
+│   ├── app.py                  # API HTTP (/assist, /health) que consume n8n
+│   ├── Dockerfile
+│   └── tests/                  # Pruebas unitarias (pytest, sin depender de Ollama real)
 └── frontend/                   # Chat UI (Streamlit) + Dockerfile
 ```
 
@@ -82,6 +89,7 @@ Al finalizar `up`, el script imprime los accesos rápidos:
 | Grafana               | http://localhost:3000            |
 | Prometheus            | http://localhost:9090            |
 | Ollama API            | http://localhost:11434           |
+| Asistente General (CrewAI) | http://localhost:8600/docs |
 
 ## Comandos disponibles
 
@@ -111,8 +119,51 @@ python scripts/jarvis_manager.py up postgres redis minio
 
 ```
 Nivel 0: postgres · neo4j · redis · minio · ollama · prometheus
-Nivel 1: n8n (← postgres, redis)      grafana (← prometheus)
-Nivel 2: streamlit-ui (← n8n)
+Nivel 1: jarvis-assistant (← ollama)   grafana (← prometheus)
+Nivel 2: n8n (← postgres, redis, jarvis-assistant)
+Nivel 3: streamlit-ui (← n8n)
+```
+
+## Asistente General (CrewAI)
+
+El servicio `jarvis-assistant` (carpeta [`assistant/`](assistant/)) añade un
+equipo de agentes colaborativos construido con [CrewAI](https://docs.crewai.com/)
+que usa el propio Ollama de la infraestructura como LLM (sin depender de
+ninguna API de pago):
+
+| Agente         | Rol                                                              |
+|----------------|-------------------------------------------------------------------|
+| Planificador   | Desglosa la petición del usuario en pasos de investigación.       |
+| Investigador   | Reúne los datos y argumentos relevantes para responder.           |
+| Redactor       | Sintetiza todo en una respuesta final clara, en español.          |
+
+Se expone como un **microservicio HTTP** (FastAPI) en lugar de un script
+suelto, para que n8n lo invoque con un nodo "HTTP Request" sin necesitar
+Python/CrewAI instalados dentro del contenedor de n8n:
+
+- `GET  /health` → chequeo de salud (usado por `jarvis_manager.py status`).
+- `POST /assist` → `{"message": "...", "user_id": "...", "language": "es"}`
+  devuelve `{"response_text": "...", "success": true, "latency_ms": 1234}`.
+
+### Ejecutar las pruebas del asistente
+
+Las pruebas usan mocks para `Crew.kickoff`, por lo que **no requieren tener
+Ollama corriendo** ni la stack levantada:
+
+```powershell
+python -m pip install -r assistant/requirements-dev.txt
+python -m pytest assistant/tests -v
+```
+
+### Probar el microservicio manualmente
+
+```powershell
+python scripts/jarvis_manager.py up ollama jarvis-assistant
+python scripts/jarvis_manager.py pull-models   # asegura que el modelo esté descargado
+
+curl -X POST http://localhost:8600/assist `
+  -H "Content-Type: application/json" `
+  -d '{\"message\": \"Explícame en 2 líneas qué es Jarvis\"}'
 ```
 
 ## Configuración de workflows en n8n
@@ -120,10 +171,13 @@ Nivel 2: streamlit-ui (← n8n)
 1. Abre http://localhost:5678 y accede con `N8N_BASIC_AUTH_USER` /
    `N8N_BASIC_AUTH_PASSWORD` (definidos en `.env`).
 2. Configura las credenciales de Twilio/Telegram en **Credentials**.
-3. Importa/crea los workflows descritos en el informe (WF-03 Cobranza,
-   ingress webhook, classifier, AG-TUTOR, AG-COBRANZA, AG-CITAS,
-   AG-SOPORTE, AG-GUARD) y apunta el nodo LLM a `http://ollama:11434`.
-4. El webhook de ingress debe coincidir con `N8N_WEBHOOK_URL` usado por
+3. Importa el workflow [`config/n8n/workflows/asistente_general.json`](config/n8n/workflows/asistente_general.json)
+   (menú **Workflows → Import from File**): expone el webhook `jarvis-chat`
+   y lo conecta con `jarvis-assistant` (`/assist`) y una respuesta al usuario.
+4. Para los demás workflows del informe (WF-03 Cobranza, classifier,
+   AG-TUTOR, AG-COBRANZA, AG-CITAS, AG-SOPORTE, AG-GUARD), apunta el nodo
+   LLM a `http://ollama:11434` como hasta ahora.
+5. El webhook de ingress debe coincidir con `N8N_WEBHOOK_URL` usado por
    el frontend Streamlit (`frontend/app.py`).
 
 ## Notas de seguridad (Habeas Data)
