@@ -1,0 +1,36 @@
+# Archivos y directorios comunes a excluir
+*.key
+*.pem
+*.p12
+*.crt
+*.cert
+*.conf
+*.ini
+*.json
+*.yaml
+*.yml
+*.lock
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+*.tmp
+*.temp
+
+# Archivos específicos de configuracion
+.env
+.DS_Store
+.vscode/
+
+# Directorios de dependencias
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Datos Ollama
+ollama-data/
