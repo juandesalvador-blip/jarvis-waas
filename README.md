@@ -191,12 +191,64 @@ Cuando necesites conectar WhatsApp/Telegram/Twilio, activa n8n:
 python scripts/jarvis_manager.py up n8n
 ```
 
-1. Abre http://localhost:5678 y accede con `N8N_BASIC_AUTH_USER` /
-   `N8N_BASIC_AUTH_PASSWORD` (definidos en `.env`).
+1. Abre http://localhost:5678 (puerto real en `N8N_PORT` de tu `.env`) y
+   accede con `N8N_BASIC_AUTH_USER` / `N8N_BASIC_AUTH_PASSWORD`.
 2. Configura las credenciales de Twilio/Telegram en **Credentials**.
 3. Importa el workflow [`config/n8n/workflows/asistente_general.json`](config/n8n/workflows/asistente_general.json)
    (menú **Workflows → Import from File**): expone el webhook `jarvis-chat`
    y lo conecta con `jarvis-assistant` (`/assist`) y una respuesta al usuario.
+
+### Canal de Telegram
+
+El workflow [`config/n8n/workflows/telegram_bot.json`](config/n8n/workflows/telegram_bot.json)
+conecta un bot de Telegram directamente con `jarvis-assistant`
+(cada chat de Telegram se trata como un `user_id` distinto, así que la
+memoria de conversación de `storage.py` funciona igual que en el chat web).
+
+**1. Crea el bot (una sola vez, gratis, sin verificación de negocio):**
+
+1. Abre Telegram y busca **@BotFather**.
+2. Envía `/newbot` y sigue las instrucciones (nombre y username del bot).
+3. BotFather te da un **token** con este formato: `123456789:ABC-...`.
+   Guárdalo, es la única credencial que necesitas.
+
+**2. Carga el token en n8n (nunca lo pegues en el chat conmigo ni en `.env`):**
+
+1. Con n8n activo (`up n8n`), abre http://localhost:5679 (o tu `N8N_PORT`).
+2. Ve a **Credentials → Add Credential → Telegram API**.
+3. Pega el **Access Token** de BotFather y guarda la credencial como
+   `Telegram account` (mismo nombre que usa el workflow exportado).
+
+**3. Importa y activa el workflow:**
+
+1. **Workflows → Import from File** → selecciona `telegram_bot.json`.
+2. Abre los nodos **Telegram Trigger** y **Responder en Telegram** y
+   verifica que usan la credencial `Telegram account` que creaste.
+3. Activa el workflow (toggle **Active** arriba a la derecha).
+
+**4. Expón el webhook de n8n a internet (Telegram necesita una URL pública HTTPS):**
+
+Para pruebas locales, la forma más rápida es un túnel con
+[ngrok](https://ngrok.com/download):
+
+```powershell
+ngrok http 5679
+```
+
+Copia la URL `https://xxxx.ngrok-free.app` que te da ngrok y:
+
+1. En `.env`, pon `N8N_WEBHOOK_URL=https://xxxx.ngrok-free.app/` (y
+   `N8N_HOST` a ese mismo dominio sin `https://`), luego
+   `python scripts/jarvis_manager.py restart n8n`.
+2. En n8n, vuelve a abrir/guardar el workflow de Telegram para que
+   registre el webhook con la nueva URL pública.
+
+> Para un uso más permanente (sin depender de ngrok cada vez), despliega
+> Jarvis en un VPS con dominio propio y TLS (Traefik/Caddy) y usa esa URL
+> fija en `N8N_WEBHOOK_URL`.
+
+**5. Prueba:** escríbele a tu bot en Telegram. El mensaje pasa por
+`Telegram Trigger → jarvis-assistant (/assist) → Responder en Telegram`.
 
 ## Notas de seguridad (Habeas Data)
 

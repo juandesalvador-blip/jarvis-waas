@@ -438,20 +438,21 @@ def print_access_urls() -> None:
         ("Ollama API", f"http://localhost:{env('OLLAMA_PORT','11434')}"),
         ("Asistente General (CrewAI)", f"http://localhost:{env('ASSISTANT_PORT','8600')}/docs"),
     ]
-    extras_rows = [
-        ("n8n (workflows)", f"http://localhost:{env('N8N_PORT','5678')}"),
-        ("Neo4j Browser", f"http://localhost:{env('NEO4J_HTTP_PORT','7474')}"),
-        ("MinIO Console", f"http://localhost:{env('MINIO_CONSOLE_PORT','9001')}"),
-        ("Grafana", f"http://localhost:{env('GRAFANA_PORT','3000')}"),
-        ("Prometheus", f"http://localhost:{env('PROMETHEUS_PORT','9090')}"),
-    ]
+    extras_rows = {
+        "n8n": ("n8n (workflows)", f"http://localhost:{env('N8N_PORT','5678')}"),
+        "neo4j": ("Neo4j Browser", f"http://localhost:{env('NEO4J_HTTP_PORT','7474')}"),
+        "minio": ("MinIO Console", f"http://localhost:{env('MINIO_CONSOLE_PORT','9001')}"),
+        "grafana": ("Grafana", f"http://localhost:{env('GRAFANA_PORT','3000')}"),
+        "prometheus": ("Prometheus", f"http://localhost:{env('PROMETHEUS_PORT','9090')}"),
+    }
     for label, url in core_rows:
         log(f"  - {label}: {url}")
 
-    running_services = build_services()
-    if any(svc.profile == "extras" and container_running(name) for name, svc in running_services.items()):
+    running_extras = [name for name in extras_rows if container_running(name)]
+    if running_extras:
         log("\n[bold]Extras activos:[/bold]")
-        for label, url in extras_rows:
+        for name in running_extras:
+            label, url = extras_rows[name]
             log(f"  - {label}: {url}")
 
 
