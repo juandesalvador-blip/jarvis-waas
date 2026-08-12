@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from crew import run_assistant
+from storage import format_history_for_prompt, get_recent_history, save_message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis.assistant")
@@ -47,10 +48,18 @@ def health() -> dict:
 
 @app.post("/assist", response_model=AssistResponse)
 def assist(payload: AssistRequest) -> AssistResponse:
-    logger.info("Nueva solicitud de asistente (user_id=%s)", payload.user_id)
-    result = run_assistant(payload.message)
+    user_id = payload.user_id or "anonymous"
+    logger.info("Nueva solicitud de asistente (user_id=%s)", user_id)
+
+    history = format_history_for_prompt(get_recent_history(user_id))
+    result = run_assistant(payload.message, history=history)
     if not result.success:
-        logger.error("El equipo de agentes falló: %s", result.error)
+        logger.error("El agente falló: %s", result.error)
+
+    save_message(user_id, "user", payload.message)
+    if result.success:
+        save_message(user_id, "assistant", result.response_text)
+
     return AssistResponse(
         response_text=result.response_text,
         success=result.success,

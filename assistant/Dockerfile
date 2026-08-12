@@ -12,7 +12,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY crew.py app.py ./
+COPY crew.py app.py storage.py ./
+
+RUN mkdir -p /app/data
 
 EXPOSE 8000
 

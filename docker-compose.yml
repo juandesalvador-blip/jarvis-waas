@@ -1,7 +1,15 @@
 # =============================================================================
 # JARVIS – AI Workforce as a Service (AI-WaaS)
-# Infraestructura completa: n8n + PostgreSQL + Neo4j + MinIO + Redis + Ollama
-#                            + Prometheus + Grafana + Streamlit UI
+#
+# NÚCLEO COMPACTO (siempre activo, sin profile):
+#   ollama · jarvis-assistant · streamlit-ui
+#   -> lo mínimo para tener un asistente de IA local funcionando.
+#
+# EXTRAS (profile "extras", se activan cuando realmente se necesitan):
+#   postgres · neo4j · redis · minio · n8n · prometheus · grafana
+#   -> agrégalos con: docker compose --profile extras up -d
+#      o con:          python scripts/jarvis_manager.py up --all
+#
 # La orquestación (orden de arranque, health checks, dependencias) la maneja
 # scripts/jarvis_manager.py — este archivo solo declara los servicios.
 # =============================================================================
@@ -21,85 +29,12 @@ volumes:
   n8n-data:
   prometheus-data:
   grafana-data:
+  assistant-data:
 
 services:
-  # ---------------------------------------------------------------------------
-  # Base de datos estructurada (clientes, deudas, conversaciones, tareas, etc.)
-  # ---------------------------------------------------------------------------
-  postgres:
-    image: postgres:15-alpine
-    container_name: jarvis-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-jarvis}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB: ${POSTGRES_DB:-jarvis}
-      TZ: ${TZ:-America/Bogota}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks:
-      - jarvis-net
-
-  # ---------------------------------------------------------------------------
-  # Knowledge Graph (relaciones Persona/Conocimiento/Actividad)
-  # ---------------------------------------------------------------------------
-  neo4j:
-    image: neo4j:5-community
-    container_name: jarvis-neo4j
-    restart: unless-stopped
-    environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme123}
-      NEO4J_dbms_memory_pagecache_size: 512M
-      NEO4J_dbms_memory_heap_initial__size: 512M
-      NEO4J_dbms_memory_heap_max__size: 1G
-      TZ: ${TZ:-America/Bogota}
-    ports:
-      - "${NEO4J_HTTP_PORT:-7474}:7474"
-      - "${NEO4J_BOLT_PORT:-7687}:7687"
-    volumes:
-      - neo4j-data:/data
-      - neo4j-logs:/logs
-      - ./config/neo4j:/config-init:ro
-    networks:
-      - jarvis-net
-
-  # ---------------------------------------------------------------------------
-  # Cache / colas de trabajo / rate-limiting
-  # ---------------------------------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: jarvis-redis
-    restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-changeme}", "--appendonly", "yes"]
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - jarvis-net
-
-  # ---------------------------------------------------------------------------
-  # Almacenamiento de objetos S3-compatible (PDFs, audio, imágenes, video)
-  # ---------------------------------------------------------------------------
-  minio:
-    image: minio/minio:latest
-    container_name: jarvis-minio
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-jarvis_admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme123}
-      TZ: ${TZ:-America/Bogota}
-    ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - minio-data:/data
-    networks:
-      - jarvis-net
+  # ===========================================================================
+  # NÚCLEO COMPACTO
+  # ===========================================================================
 
   # ---------------------------------------------------------------------------
   # Motor de LLMs locales (Qwen, Kimi, Llama, Mistral, etc.)
@@ -124,9 +59,9 @@ services:
     #           capabilities: [gpu]
 
   # ---------------------------------------------------------------------------
-  # Asistente general (CrewAI): equipo de agentes (Planificador/Investigador/
-  # Redactor) expuesto por HTTP para que n8n lo invoque con un nodo
-  # "HTTP Request" en vez de tener que ejecutar Python dentro de n8n.
+  # Asistente general (CrewAI, un solo agente): responde al usuario usando
+  # Ollama, con historial de conversación en SQLite (sin contenedor extra).
+  # Expuesto por HTTP para que el frontend (o luego n8n) lo invoque.
   # ---------------------------------------------------------------------------
   jarvis-assistant:
     build:
@@ -136,22 +71,125 @@ services:
     restart: unless-stopped
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_ASSISTANT_MODEL:-qwen2.5:7b}
+      OLLAMA_MODEL: ${OLLAMA_ASSISTANT_MODEL:-qwen2.5:3b}
+      ASSISTANT_DB_PATH: /app/data/assistant.db
       TZ: ${TZ:-America/Bogota}
     ports:
       - "${ASSISTANT_PORT:-8600}:8000"
+    volumes:
+      - assistant-data:/app/data
     networks:
       - jarvis-net
     depends_on:
       - ollama
 
   # ---------------------------------------------------------------------------
-  # Orquestador de workflows (ingress, classifier, router, agentes)
+  # Frontend: chat UI que habla directamente con jarvis-assistant.
   # ---------------------------------------------------------------------------
+  streamlit-ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: jarvis-streamlit-ui
+    restart: unless-stopped
+    environment:
+      ASSISTANT_URL: ${ASSISTANT_URL:-http://jarvis-assistant:8000/assist}
+      TZ: ${TZ:-America/Bogota}
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    networks:
+      - jarvis-net
+    depends_on:
+      - jarvis-assistant
+
+  # ===========================================================================
+  # EXTRAS (profile "extras") — agregar solo cuando se necesiten:
+  #   - postgres/neo4j: cuando se implemente memoria estructurada o knowledge
+  #     graph más allá del historial simple en SQLite del asistente.
+  #   - redis: cuando se necesiten colas de trabajo reales o rate-limiting.
+  #   - minio: cuando el asistente maneje archivos (PDFs, audio, imágenes).
+  #   - n8n: cuando se integren canales externos (WhatsApp/Telegram/Twilio)
+  #     o flujos multi-agente que se beneficien de un orquestador visual.
+  #   - prometheus/grafana: cuando haya suficiente tráfico real para justificar
+  #     dashboards de monitoreo.
+  # ===========================================================================
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: jarvis-postgres
+    restart: unless-stopped
+    profiles: ["extras"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jarvis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-jarvis}
+      TZ: ${TZ:-America/Bogota}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - jarvis-net
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: jarvis-neo4j
+    restart: unless-stopped
+    profiles: ["extras"]
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme123}
+      NEO4J_dbms_memory_pagecache_size: 512M
+      NEO4J_dbms_memory_heap_initial__size: 512M
+      NEO4J_dbms_memory_heap_max__size: 1G
+      TZ: ${TZ:-America/Bogota}
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - ./config/neo4j:/config-init:ro
+    networks:
+      - jarvis-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: jarvis-redis
+    restart: unless-stopped
+    profiles: ["extras"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-changeme}", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - jarvis-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: jarvis-minio
+    restart: unless-stopped
+    profiles: ["extras"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-jarvis_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme123}
+      TZ: ${TZ:-America/Bogota}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - jarvis-net
+
+  # Orquestador de workflows (ingress multi-canal, classifier, router, agentes)
   n8n:
     image: n8nio/n8n:latest
     container_name: jarvis-n8n
     restart: unless-stopped
+    profiles: ["extras"]
     environment:
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
@@ -183,13 +221,11 @@ services:
       - redis
       - jarvis-assistant
 
-  # ---------------------------------------------------------------------------
-  # Monitoreo de métricas (CPU, memoria, latencia, QPS, KPIs)
-  # ---------------------------------------------------------------------------
   prometheus:
     image: prom/prometheus:latest
     container_name: jarvis-prometheus
     restart: unless-stopped
+    profiles: ["extras"]
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -205,6 +241,7 @@ services:
     image: grafana/grafana:latest
     container_name: jarvis-grafana
     restart: unless-stopped
+    profiles: ["extras"]
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
@@ -218,22 +255,3 @@ services:
       - jarvis-net
     depends_on:
       - prometheus
-
-  # ---------------------------------------------------------------------------
-  # Frontend: chat UI con voz (STT/TTS) que envía mensajes al webhook de n8n
-  # ---------------------------------------------------------------------------
-  streamlit-ui:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: jarvis-streamlit-ui
-    restart: unless-stopped
-    environment:
-      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/jarvis-chat}
-      TZ: ${TZ:-America/Bogota}
-    ports:
-      - "${STREAMLIT_PORT:-8501}:8501"
-    networks:
-      - jarvis-net
-    depends_on:
-      - n8n

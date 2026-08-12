@@ -1,21 +1,21 @@
 """
 crew.py – Lógica del "Asistente General" de Jarvis, construida con CrewAI.
 
-Este módulo define un pequeño equipo (Crew) de agentes que colaboran para
-responder preguntas generales del usuario:
+Núcleo compacto: **un solo agente** responde directamente al usuario,
+usando el historial reciente de la conversación como contexto. Esto es
+deliberadamente más simple (y ~3x más rápido) que un equipo de varios
+agentes secuenciales; si en el futuro una tarea concreta lo justifica
+(por ejemplo, investigación multi-paso), se puede volver a un Crew de
+varios agentes sin cambiar la interfaz pública de este módulo.
 
-    1. Planificador   -> desglosa la solicitud en pasos claros
-    2. Investigador    -> reúne los datos/argumentos relevantes
-    3. Redactor         -> sintetiza todo en una respuesta final en español
-
-El equipo usa un LLM servido por Ollama (parte de la infraestructura de
+El agente usa un LLM servido por Ollama (parte de la infraestructura de
 Jarvis) a través de LiteLLM, por lo que no depende de ninguna API externa
 de pago.
 
-Este módulo es intencionalmente independiente de FastAPI/n8n: expone una
+Este módulo es intencionalmente independiente de FastAPI: expone una
 única función pública (`run_assistant`) para que sea fácil de probar con
-pytest y de reutilizar desde otros puntos de entrada (CLI, microservicio,
-etc.), sin acoplar la lógica de agentes al transporte HTTP.
+pytest y de reutilizar desde otros puntos de entrada, sin acoplar la
+lógica del agente al transporte HTTP ni al almacenamiento.
 """
 
 from __future__ import annotations
@@ -28,7 +28,14 @@ from typing import Optional
 from crewai import Agent, Crew, LLM, Process, Task
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+# Ollama en CPU (sin GPU) puede tardar bastante por llamada; el timeout por
+# defecto de LiteLLM (600s) es insuficiente en hardware modesto.
+LLM_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "1800"))
+
+# Evita que CrewAI muestre prompts interactivos (confirmación de telemetría,
+# "¿ver tus trazas de ejecución?") en un servicio no interactivo como este.
+os.environ.setdefault("CREWAI_TESTING", "true")
 
 
 @dataclass
@@ -46,87 +53,43 @@ def build_llm() -> LLM:
         base_url=OLLAMA_BASE_URL,
         api_base=OLLAMA_BASE_URL,
         temperature=0.4,
+        timeout=LLM_TIMEOUT_SECONDS,
     )
 
 
 def build_crew(llm: LLM) -> Crew:
-    """Define los agentes y tareas del equipo de asistencia general."""
-    planner = Agent(
-        role="Planificador",
-        goal="Desglosar la solicitud del usuario en pasos claros y accionables.",
+    """Define el agente único y su tarea para el asistente general."""
+    assistant = Agent(
+        role="Asistente General de Jarvis",
+        goal="Responder directamente y con precisión a las preguntas del usuario, en español.",
         backstory=(
-            "Eres un analista meticuloso de Jarvis, la plataforma de IA de Ángel. "
-            "Tu trabajo es entender qué pide realmente el usuario antes de que "
-            "el resto del equipo actúe."
+            "Eres Jarvis, un asistente de IA amable, directo y profesional. "
+            "Respondes de forma clara y concisa, usando el historial de la "
+            "conversación cuando sea relevante, y siendo honesto cuando no "
+            "sabes algo en vez de inventar datos."
         ),
         llm=llm,
         allow_delegation=False,
         verbose=False,
     )
 
-    researcher = Agent(
-        role="Investigador",
-        goal="Reunir la información, datos y argumentos necesarios para responder con precisión.",
-        backstory=(
-            "Eres el investigador de Jarvis. Usas tu conocimiento para reunir "
-            "hechos, ejemplos y contexto relevante, siendo honesto cuando algo "
-            "es incierto en vez de inventar datos."
-        ),
-        llm=llm,
-        allow_delegation=False,
-        verbose=False,
-    )
-
-    writer = Agent(
-        role="Redactor de Respuestas",
-        goal="Sintetizar la investigación en una respuesta clara, breve y útil en español.",
-        backstory=(
-            "Eres la voz de Jarvis frente al usuario final. Escribes en un "
-            "tono amable, profesional y directo, evitando la jerga innecesaria."
-        ),
-        llm=llm,
-        allow_delegation=False,
-        verbose=False,
-    )
-
-    plan_task = Task(
+    respond_task = Task(
         description=(
-            "El usuario envió este mensaje a Jarvis:\n\n\"{message}\"\n\n"
-            "Desglosa en 2 a 4 pasos breves qué información se necesita para "
-            "responder bien a este mensaje."
-        ),
-        expected_output="Una lista corta (2-4 puntos) con el plan de investigación.",
-        agent=planner,
-    )
-
-    research_task = Task(
-        description=(
-            "Siguiendo el plan anterior, reúne la información y los "
-            "argumentos necesarios para responder a este mensaje del "
-            "usuario:\n\n\"{message}\""
-        ),
-        expected_output="Los hallazgos clave, organizados y listos para redactar la respuesta final.",
-        agent=researcher,
-        context=[plan_task],
-    )
-
-    write_task = Task(
-        description=(
-            "Con base en los hallazgos anteriores, redacta la respuesta "
-            "final en español para el usuario, que responda directamente a "
-            "su mensaje:\n\n\"{message}\"\n\n"
-            "El tono debe ser amable y profesional. No menciones el proceso "
-            "interno del equipo (plan, investigación); entrega solo la "
-            "respuesta final como si Jarvis hablara directamente con el usuario."
+            "Historial reciente de la conversación con este usuario:\n"
+            "{history}\n\n"
+            "Nuevo mensaje del usuario:\n\"{message}\"\n\n"
+            "Responde directamente al usuario en español, de forma clara, "
+            "breve y útil, teniendo en cuenta el historial si aplica. No "
+            "menciones que eres un 'agente' ni describas tu proceso interno; "
+            "responde como si estuvieras hablando directamente con la persona."
         ),
         expected_output="La respuesta final, lista para mostrarse al usuario.",
-        agent=writer,
-        context=[research_task],
+        agent=assistant,
     )
 
     return Crew(
-        agents=[planner, researcher, writer],
-        tasks=[plan_task, research_task, write_task],
+        agents=[assistant],
+        tasks=[respond_task],
         process=Process.sequential,
         verbose=False,
     )
@@ -136,19 +99,19 @@ _crew_singleton: Optional[Crew] = None
 
 
 def get_crew() -> Crew:
-    """Reutiliza la misma instancia del Crew entre peticiones (agentes sin estado)."""
+    """Reutiliza la misma instancia del Crew entre peticiones (agente sin estado propio)."""
     global _crew_singleton
     if _crew_singleton is None:
         _crew_singleton = build_crew(build_llm())
     return _crew_singleton
 
 
-def run_assistant(message: str) -> AssistantResult:
-    """Punto de entrada público: ejecuta el equipo de agentes sobre `message`."""
+def run_assistant(message: str, history: str = "(sin conversación previa)") -> AssistantResult:
+    """Punto de entrada público: ejecuta el agente sobre `message` con `history` como contexto."""
     start = time.time()
     try:
         crew = get_crew()
-        result = crew.kickoff(inputs={"message": message})
+        result = crew.kickoff(inputs={"message": message, "history": history})
         return AssistantResult(
             response_text=str(result).strip(),
             success=True,

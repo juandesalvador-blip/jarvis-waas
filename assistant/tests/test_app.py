@@ -1,4 +1,4 @@
-"""Pruebas del microservicio HTTP (`app.py`), sin llamar a Ollama de verdad."""
+"""Pruebas del microservicio HTTP (`app.py`), sin llamar a Ollama ni a SQLite real."""
 
 from unittest.mock import patch
 
@@ -24,7 +24,9 @@ def test_assist_endpoint_success():
         error=None,
         latency_ms=123,
     )
-    with patch.object(app_module, "run_assistant", return_value=fake_result):
+    with patch.object(app_module, "run_assistant", return_value=fake_result) as mock_run, \
+         patch.object(app_module, "get_recent_history", return_value=[]), \
+         patch.object(app_module, "save_message") as mock_save:
         response = client.post(
             "/assist", json={"message": "hola", "user_id": "juan", "language": "es"}
         )
@@ -34,6 +36,9 @@ def test_assist_endpoint_success():
     assert body["response_text"] == "Hola, soy Jarvis."
     assert body["success"] is True
     assert body["latency_ms"] == 123
+
+    mock_run.assert_called_once_with("hola", history="(sin conversación previa)")
+    assert mock_save.call_count == 2  # guarda el mensaje del usuario y la respuesta
 
 
 def test_assist_endpoint_requires_message():
@@ -48,9 +53,24 @@ def test_assist_endpoint_propagates_failure_flag():
         error="timeout",
         latency_ms=50,
     )
-    with patch.object(app_module, "run_assistant", return_value=fake_result):
+    with patch.object(app_module, "run_assistant", return_value=fake_result), \
+         patch.object(app_module, "get_recent_history", return_value=[]), \
+         patch.object(app_module, "save_message") as mock_save:
         response = client.post("/assist", json={"message": "hola"})
 
     body = response.json()
     assert body["success"] is False
     assert body["error"] == "timeout"
+    # Solo se guarda el mensaje del usuario; no una respuesta fallida.
+    assert mock_save.call_count == 1
+
+
+def test_assist_endpoint_uses_default_user_id_when_missing():
+    fake_result = AssistantResult(response_text="ok", success=True, latency_ms=1)
+    with patch.object(app_module, "run_assistant", return_value=fake_result), \
+         patch.object(app_module, "get_recent_history", return_value=[]) as mock_history, \
+         patch.object(app_module, "save_message") as mock_save:
+        client.post("/assist", json={"message": "hola"})
+
+    mock_history.assert_called_once_with("anonymous")
+    mock_save.assert_any_call("anonymous", "user", "hola")

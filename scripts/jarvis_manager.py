@@ -3,12 +3,18 @@
 jarvis_manager.py – Orquestador de la infraestructura Docker de Jarvis
 (AI Workforce as a Service).
 
+NÚCLEO COMPACTO por defecto: `up` (sin argumentos) solo levanta
+ollama + jarvis-assistant + streamlit-ui. Los servicios "extras"
+(postgres, neo4j, redis, minio, n8n, prometheus, grafana) solo se
+levantan si los pides explícitamente por nombre o con `--all`.
+
 Automatiza la ejecución de los contenedores definidos en `docker-compose.yml`
 respetando el orden de dependencias descrito en la arquitectura:
 
     Nivel 0 (sin dependencias):  postgres, neo4j, redis, minio, ollama, prometheus
-    Nivel 1 (dependen de N0):    n8n (postgres, redis) · grafana (prometheus)
-    Nivel 2 (dependen de N1):    streamlit-ui (n8n)
+    Nivel 1 (dependen de N0):    jarvis-assistant (ollama) · n8n (postgres, redis,
+                                 jarvis-assistant) · grafana (prometheus)
+    Nivel 2 (dependen de N1):    streamlit-ui (jarvis-assistant)
 
 Para cada servicio se ejecuta un chequeo de salud real (HTTP o `exec` dentro
 del contenedor) en vez de confiar solo en el estado "Up" de Docker, de forma
@@ -17,7 +23,7 @@ realmente listo para recibir tráfico.
 
 Uso:
     python scripts/jarvis_manager.py doctor
-    python scripts/jarvis_manager.py up [servicio ...] [--no-build] [--timeout 180]
+    python scripts/jarvis_manager.py up [servicio ...] [--all] [--no-build] [--timeout 180]
     python scripts/jarvis_manager.py down [--volumes]
     python scripts/jarvis_manager.py restart <servicio>
     python scripts/jarvis_manager.py status
@@ -87,6 +93,9 @@ class Service:
     depends_on: list[str] = field(default_factory=list)
     check: Optional[Callable[[], bool]] = None
     startup_hint: str = ""
+    # "core": parte del núcleo compacto, se levanta siempre por defecto.
+    # "extras": solo se levanta si se pide explícitamente o con --all.
+    profile: str = "core"
 
 
 def http_ok(url: str, timeout: float = 3.0) -> bool:
@@ -140,71 +149,84 @@ def build_services() -> dict[str, Service]:
     assistant_port = env("ASSISTANT_PORT", "8600")
 
     services: dict[str, Service] = {
-        "postgres": Service(
-            "postgres",
-            "Base de datos estructurada (clientes, deudas, mensajes, tareas)",
-            check=lambda: container_running("postgres")
-            and (exec_ok("postgres", "pg_isready", "-U", postgres_user) or tcp_ok("localhost", postgres_port)),
-        ),
-        "neo4j": Service(
-            "neo4j",
-            "Knowledge Graph (Persona/Conocimiento/Actividad)",
-            check=lambda: container_running("neo4j") and http_ok(f"http://localhost:{neo4j_http_port}"),
-            startup_hint="Neo4j puede tardar ~30s en la primera carga.",
-        ),
-        "redis": Service(
-            "redis",
-            "Cache / colas de trabajo / rate-limiting",
-            check=lambda: container_running("redis") and tcp_ok("localhost", redis_port),
-        ),
-        "minio": Service(
-            "minio",
-            "Almacenamiento S3-compatible (PDF, audio, imágenes)",
-            check=lambda: container_running("minio")
-            and http_ok(f"http://localhost:{minio_api_port}/minio/health/live"),
-        ),
+        # --- Núcleo compacto (siempre activo) -----------------------------
         "ollama": Service(
             "ollama",
             "Runtime de LLMs locales (Qwen, Kimi, Llama, Mistral)",
             check=lambda: container_running("ollama") and http_ok(f"http://localhost:{ollama_port}/api/tags"),
             startup_hint="La primera descarga de modelos puede tardar varios minutos.",
         ),
-        "prometheus": Service(
-            "prometheus",
-            "Recolección de métricas",
-            check=lambda: container_running("prometheus")
-            and http_ok(f"http://localhost:{prometheus_port}/-/healthy"),
-        ),
         "jarvis-assistant": Service(
             "jarvis-assistant",
-            "Asistente general (CrewAI): Planificador + Investigador + Redactor",
+            "Asistente general (CrewAI, 1 agente + memoria en SQLite)",
             depends_on=["ollama"],
             check=lambda: container_running("jarvis-assistant")
             and http_ok(f"http://localhost:{assistant_port}/health"),
             startup_hint="La primera respuesta puede tardar mientras Ollama carga el modelo en memoria.",
         ),
+        "streamlit-ui": Service(
+            "streamlit-ui",
+            "Frontend de chat (habla directo con jarvis-assistant)",
+            depends_on=["jarvis-assistant"],
+            check=lambda: container_running("streamlit-ui")
+            and http_ok(f"http://localhost:{streamlit_port}/_stcore/health"),
+        ),
+        # --- Extras (profile "extras", opt-in) ----------------------------
+        "postgres": Service(
+            "postgres",
+            "Base de datos estructurada (clientes, deudas, mensajes, tareas)",
+            check=lambda: container_running("postgres")
+            and (exec_ok("postgres", "pg_isready", "-U", postgres_user) or tcp_ok("localhost", postgres_port)),
+            profile="extras",
+        ),
+        "neo4j": Service(
+            "neo4j",
+            "Knowledge Graph (Persona/Conocimiento/Actividad)",
+            check=lambda: container_running("neo4j") and http_ok(f"http://localhost:{neo4j_http_port}"),
+            startup_hint="Neo4j puede tardar ~30s en la primera carga.",
+            profile="extras",
+        ),
+        "redis": Service(
+            "redis",
+            "Cache / colas de trabajo / rate-limiting",
+            check=lambda: container_running("redis") and tcp_ok("localhost", redis_port),
+            profile="extras",
+        ),
+        "minio": Service(
+            "minio",
+            "Almacenamiento S3-compatible (PDF, audio, imágenes)",
+            check=lambda: container_running("minio")
+            and http_ok(f"http://localhost:{minio_api_port}/minio/health/live"),
+            profile="extras",
+        ),
+        "prometheus": Service(
+            "prometheus",
+            "Recolección de métricas",
+            check=lambda: container_running("prometheus")
+            and http_ok(f"http://localhost:{prometheus_port}/-/healthy"),
+            profile="extras",
+        ),
         "n8n": Service(
             "n8n",
-            "Workflow engine (ingress, classifier, router, agentes)",
+            "Workflow engine (ingress multi-canal, classifier, router)",
             depends_on=["postgres", "redis", "jarvis-assistant"],
             check=lambda: container_running("n8n") and http_ok(f"http://localhost:{n8n_port}/healthz"),
             startup_hint="n8n espera a que PostgreSQL esté listo antes de migrar su esquema.",
+            profile="extras",
         ),
         "grafana": Service(
             "grafana",
             "Dashboards de monitoreo",
             depends_on=["prometheus"],
             check=lambda: container_running("grafana") and http_ok(f"http://localhost:{grafana_port}/api/health"),
-        ),
-        "streamlit-ui": Service(
-            "streamlit-ui",
-            "Frontend de chat con voz (STT/TTS)",
-            depends_on=["n8n"],
-            check=lambda: container_running("streamlit-ui")
-            and http_ok(f"http://localhost:{streamlit_port}/_stcore/health"),
+            profile="extras",
         ),
     }
     return services
+
+
+def core_services(services: dict[str, Service]) -> set[str]:
+    return {name for name, svc in services.items() if svc.profile == "core"}
 
 
 def topological_levels(services: dict[str, Service]) -> list[list[str]]:
@@ -264,7 +286,14 @@ def compose_run(
 ) -> subprocess.CompletedProcess:
     """Ejecuta `docker compose <args>`. Nunca lanza excepción; el llamador
     decide qué hacer con `returncode` (o pasa check=True para propagarlo)."""
-    cmd = [*compose_base(), "-f", str(COMPOSE_FILE), "--project-directory", str(ROOT_DIR), *args]
+    # "--profile extras" no ACTIVA los servicios extra por sí solo; solo hace
+    # que 'docker compose' los reconozca cuando este script los pide por
+    # nombre explícitamente (el filtrado real de "qué se levanta por
+    # defecto" lo decide cmd_up, no docker compose).
+    cmd = [
+        *compose_base(), "-f", str(COMPOSE_FILE), "--project-directory", str(ROOT_DIR),
+        "--profile", "extras", *args,
+    ]
     result = subprocess.run(
         cmd, cwd=ROOT_DIR, capture_output=capture, text=True,
         encoding="utf-8", errors="replace",
@@ -346,7 +375,19 @@ def wait_for_health(service: Service, timeout: int) -> bool:
 def cmd_up(args: argparse.Namespace) -> None:
     ensure_env_file()
     services = build_services()
-    target = set(args.services) if args.services else set(services)
+
+    if args.services:
+        target = set(args.services)
+    elif args.all:
+        target = set(services)
+    else:
+        target = core_services(services)
+        log(
+            "[dim]Levantando el núcleo compacto (ollama, jarvis-assistant, "
+            "streamlit-ui). Usa --all o pide servicios por nombre para "
+            "incluir los extras (postgres, neo4j, redis, minio, n8n, "
+            "prometheus, grafana).[/dim]"
+        )
 
     unknown = target - set(services)
     if unknown:
@@ -392,18 +433,26 @@ def cmd_up(args: argparse.Namespace) -> None:
 
 
 def print_access_urls() -> None:
-    rows = [
+    core_rows = [
         ("Streamlit UI (chat)", f"http://localhost:{env('STREAMLIT_PORT','8501')}"),
+        ("Ollama API", f"http://localhost:{env('OLLAMA_PORT','11434')}"),
+        ("Asistente General (CrewAI)", f"http://localhost:{env('ASSISTANT_PORT','8600')}/docs"),
+    ]
+    extras_rows = [
         ("n8n (workflows)", f"http://localhost:{env('N8N_PORT','5678')}"),
         ("Neo4j Browser", f"http://localhost:{env('NEO4J_HTTP_PORT','7474')}"),
         ("MinIO Console", f"http://localhost:{env('MINIO_CONSOLE_PORT','9001')}"),
         ("Grafana", f"http://localhost:{env('GRAFANA_PORT','3000')}"),
         ("Prometheus", f"http://localhost:{env('PROMETHEUS_PORT','9090')}"),
-        ("Ollama API", f"http://localhost:{env('OLLAMA_PORT','11434')}"),
-        ("Asistente General (CrewAI)", f"http://localhost:{env('ASSISTANT_PORT','8600')}/docs"),
     ]
-    for label, url in rows:
+    for label, url in core_rows:
         log(f"  - {label}: {url}")
+
+    running_services = build_services()
+    if any(svc.profile == "extras" and container_running(name) for name, svc in running_services.items()):
+        log("\n[bold]Extras activos:[/bold]")
+        for label, url in extras_rows:
+            log(f"  - {label}: {url}")
 
 
 def cmd_down(args: argparse.Namespace) -> None:
@@ -462,7 +511,9 @@ def cmd_logs(args: argparse.Namespace) -> None:
     if args.follow:
         cmd.append("-f")
     cmd.append(args.service)
-    subprocess.run([*compose_base(), "-f", str(COMPOSE_FILE), *cmd], cwd=ROOT_DIR)
+    subprocess.run(
+        [*compose_base(), "-f", str(COMPOSE_FILE), "--profile", "extras", *cmd], cwd=ROOT_DIR
+    )
 
 
 def cmd_init_db(_args: argparse.Namespace) -> None:
@@ -498,7 +549,7 @@ def cmd_init_db(_args: argparse.Namespace) -> None:
 
 
 def cmd_pull_models(_args: argparse.Namespace) -> None:
-    models = [m.strip() for m in env("OLLAMA_MODELS", "qwen2.5:7b").split(",") if m.strip()]
+    models = [m.strip() for m in env("OLLAMA_MODELS", "qwen2.5:3b").split(",") if m.strip()]
     for model in models:
         log(f"[bold]Descargando modelo Ollama: {model}[/bold]")
         subprocess.run(
@@ -524,9 +575,16 @@ def main() -> None:
     )
 
     p_up = sub.add_parser("up", help="Levanta los contenedores en el orden correcto.")
-    p_up.add_argument("services", nargs="*", help="Servicios específicos (por defecto: todos).")
+    p_up.add_argument(
+        "services", nargs="*",
+        help="Servicios específicos (por defecto: solo el núcleo compacto).",
+    )
+    p_up.add_argument(
+        "--all", action="store_true",
+        help="Levanta también los servicios 'extras' (postgres, neo4j, redis, minio, n8n, prometheus, grafana).",
+    )
     p_up.add_argument("--timeout", type=int, default=180, help="Timeout de health-check por servicio (s).")
-    p_up.add_argument("--no-build", action="store_true", help="No reconstruir la imagen de streamlit-ui.")
+    p_up.add_argument("--no-build", action="store_true", help="No reconstruir imágenes locales (assistant/streamlit).")
     p_up.set_defaults(func=cmd_up)
 
     p_down = sub.add_parser("down", help="Detiene y elimina los contenedores.")

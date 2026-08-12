@@ -34,7 +34,9 @@ def test_run_assistant_success():
     assert result.response_text == "Respuesta de prueba de Jarvis."
     assert result.error is None
     assert result.latency_ms >= 0
-    mock_crew.kickoff.assert_called_once_with(inputs={"message": "¿Qué es Jarvis?"})
+    mock_crew.kickoff.assert_called_once_with(
+        inputs={"message": "¿Qué es Jarvis?", "history": "(sin conversación previa)"}
+    )
 
 
 def test_run_assistant_handles_failure():
